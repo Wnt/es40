@@ -520,6 +520,16 @@ private:
     }
   }
 
+  // TB-entry hint in front of FindTBEntry's linear scan: direct-mapped by
+  // virtual page, filled on scan success. A hint is verified against the live
+  // TB entry before use, so a stale hint is harmless (falls through to the
+  // scan) and the array never needs invalidation. Host-side only — kept
+  // outside state so the savestate layout is unchanged.
+  static constexpr int kTbHintBits    = 10;               // 1024 slots/dir (2KB total)
+  static constexpr int kTbHintEntries = 1 << kTbHintBits;
+  static constexpr u64 kTbHintMask    = (u64) kTbHintEntries - 1;
+  u8 tb_hint[2][kTbHintEntries] = {};                     // [ITB/DTB][va page] -> tb index
+
   // ASN switch: bump the chain epoch so compiled chain edges revalidate through the asn-keyed
   // lookup paths (the chain guard checks tag+epoch only). No-op in non-JIT builds.
   void jit_note_asn_change();

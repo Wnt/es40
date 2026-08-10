@@ -3493,6 +3493,19 @@ int CAlphaCPU::FindTBEntry(u64 virt, int flags)
 		&& !((state.tb[t][i].virt ^ virt) & state.tb[t][i].match_mask)
 		&& TB_ASN_MATCH(state.tb[t][i]))	return i;
 
+	// Per-page hint next: multi-page access patterns thrash the single
+	// last-found slot. The hint index is verified like any candidate, so a
+	// stale or garbage slot just falls through to the scan.
+	const u32 h = (u32)((virt >> 13) & kTbHintMask);
+	i = tb_hint[t][h] & (TB_ENTRIES - 1);
+	if (state.tb[t][i].valid
+		&& !((state.tb[t][i].virt ^ virt) & state.tb[t][i].match_mask)
+		&& TB_ASN_MATCH(state.tb[t][i]))
+	{
+		state.last_found_tb[t][rw] = i;
+		return i;
+	}
+
 	// Otherwise, loop through the TB entries to find a match.
 	for (i = 0; i < TB_ENTRIES; i++)
 	{
@@ -3501,6 +3514,7 @@ int CAlphaCPU::FindTBEntry(u64 virt, int flags)
 			&& TB_ASN_MATCH(state.tb[t][i]))
 		{
 			state.last_found_tb[t][rw] = i;
+			tb_hint[t][h] = (u8)i;
 			return i;
 		}
 	}
