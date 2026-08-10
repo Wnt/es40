@@ -1,5 +1,9 @@
 # DEC ES40 Simulator
 
+> This fork carries a small set of local patches published for visibility;
+> see [KERNEL-HIVE-FORK.md](KERNEL-HIVE-FORK.md) for what they are and why
+> they exist. Everything below this note is upstream es40's own README.
+
 es40 is free software. Please see the file COPYING for details.
 
 For building and installation instructions please see below.
