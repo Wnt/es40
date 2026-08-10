@@ -30,5 +30,14 @@ Each patch is its own commit with a descriptive subject and body, so any of
 them can be read, reviewed, or cherry-picked independently — see the commit
 log for what changed and why.
 
+Changes that were tried, measured, and not adopted are preserved on
+experimental branches rather than silently dropped, with the measurement
+result recorded in the commit message:
+
+- [`tlb-hint-experimental`](../../tree/tlb-hint-experimental) — a verified
+  per-page hint cache in front of the translation-buffer linear scan.
+  Measured null: with `-O3` inlining the scan is no longer a measurable
+  cost, so the hint had nothing to save.
+
 This fork carries forward upstream es40's existing license terms unchanged;
 see [COPYING](COPYING).
