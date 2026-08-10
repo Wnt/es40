@@ -142,6 +142,16 @@ void CFloppyController::service_pending_media_actions_if_idle()
 
 void CFloppyController::check_state()
 {
+	// Polled every main-loop iteration. The disk array is fixed after
+	// construction and the mailbox flag is an atomic, so an empty mailbox
+	// is detected without taking controller_mutex.
+	bool pending = false;
+	for (int drive = 0; drive < 2; drive++)
+		if (FDISK(drive) != NULL && FDISK(drive)->has_pending_media_actions())
+			pending = true;
+	if (!pending)
+		return;
+
 	std::lock_guard<std::recursive_mutex> lock(controller_mutex);
 	service_pending_media_actions_if_idle();
 }
