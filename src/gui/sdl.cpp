@@ -157,6 +157,7 @@ private:
 	double         mouse_speed = 1.0;
 	bool           mouse_invert_x = false;
 	bool           mouse_invert_y = false;
+	bool           mouse_absolute = false;
 	sdl_hotkey_binding hotkey_mouse_capture;
 	sdl_hotkey_binding hotkey_media;
 	sdl_hotkey_binding hotkey_ctrl_alt_delete;
@@ -210,6 +211,12 @@ static int          sdl_mouse_button_state = 0;
 // events so multipliers < 1.0 don't drop slow movement.
 static double       sdl_mouse_accum_x = 0.0;
 static double       sdl_mouse_accum_y = 0.0;
+// mouse.absolute: previous host pointer position, for position differencing.
+// Invalidated on capture toggle and focus loss so the first event after only
+// seeds the baseline instead of producing one huge delta.
+static bool         sdl_abs_have_last = false;
+static double       sdl_abs_last_x = 0.0;
+static double       sdl_abs_last_y = 0.0;
 
 static std::string trim_hotkey_text(const std::string& value)
 {
@@ -503,6 +510,11 @@ void bx_sdl_gui_c::specific_init(unsigned x_tilesize, unsigned y_tilesize)
 
 	this->mouse_invert_x = myCfg->get_bool_value("mouse.invert_x", false);
 	this->mouse_invert_y = myCfg->get_bool_value("mouse.invert_y", false);
+	// mouse.absolute: for hosts driven through an absolute pointer stream
+	// (x11vnc/XTEST). Capture then skips SDL relative mode entirely — a
+	// center-warping hidden pointer turns every absolute event into a
+	// center-relative delta and the guest cursor dives into a corner.
+	this->mouse_absolute = myCfg->get_bool_value("mouse.absolute", false);
 	load_hotkeys();
 	build_window_titles();
 	clear_hotkey_release_state();
@@ -833,10 +845,35 @@ void bx_sdl_gui_c::handle_events(void)
 		case SDL_EVENT_MOUSE_MOTION:
 			if (sdl_grab)
 			{
+				double rel_x, rel_y;
+				if (mouse_absolute)
+				{
+					// The host pointer is an absolute stream (VNC, XTEST):
+					// SDL relative mode is off, so xrel/yrel are useless
+					// center-relative values. Difference successive window
+					// positions instead.
+					if (!sdl_abs_have_last)
+					{
+						sdl_abs_last_x = (double)sdl_event.motion.x;
+						sdl_abs_last_y = (double)sdl_event.motion.y;
+						sdl_abs_have_last = true;
+						break;
+					}
+					rel_x = (double)sdl_event.motion.x - sdl_abs_last_x;
+					rel_y = (double)sdl_event.motion.y - sdl_abs_last_y;
+					sdl_abs_last_x = (double)sdl_event.motion.x;
+					sdl_abs_last_y = (double)sdl_event.motion.y;
+				}
+				else
+				{
+					rel_x = (double)sdl_event.motion.xrel;
+					rel_y = (double)sdl_event.motion.yrel;
+				}
+
 				// PS/2 mouse Y is positive-up, SDL is positive-down; hence the
 				// baseline Y negation. invert_x/y flip on top of that.
-				double mx = (double)sdl_event.motion.xrel * mouse_speed;
-				double my = -(double)sdl_event.motion.yrel * mouse_speed;
+				double mx = rel_x * mouse_speed;
+				double my = -rel_y * mouse_speed;
 				sdl_mouse_accum_x += mouse_invert_x ? -mx : mx;
 				sdl_mouse_accum_y += mouse_invert_y ? -my : my;
 
@@ -898,6 +935,7 @@ void bx_sdl_gui_c::handle_events(void)
 		{
 			release_all_guest_keys();
 			clear_hotkey_release_state();
+			sdl_abs_have_last = false;
 			if (sdl_grab)
 				bx_gui->mouse_enabled_changed(false);
 			break;
@@ -1204,7 +1242,8 @@ void bx_sdl_gui_c::mouse_enabled_changed_specific(bool val)
 		if (sdl_window)
 		{
 			SDL_SetWindowKeyboardGrab(sdl_window, true);
-			SDL_SetWindowRelativeMouseMode(sdl_window, true);
+			if (!mouse_absolute)
+				SDL_SetWindowRelativeMouseMode(sdl_window, true);
 			SDL_SetWindowTitle(sdl_window, window_title_grabbed.c_str());
 		}
 	}
@@ -1214,11 +1253,13 @@ void bx_sdl_gui_c::mouse_enabled_changed_specific(bool val)
 		if (sdl_window)
 		{
 			SDL_SetWindowKeyboardGrab(sdl_window, false);
-			SDL_SetWindowRelativeMouseMode(sdl_window, false);
+			if (!mouse_absolute)
+				SDL_SetWindowRelativeMouseMode(sdl_window, false);
 			SDL_SetWindowTitle(sdl_window, window_title.c_str());
 		}
 	}
 
+	sdl_abs_have_last = false;
 	sdl_grab = val;
 }
 
