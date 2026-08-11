@@ -83,9 +83,21 @@ public:
     m_h = h;
   }
 
-  // Called from handle_events(): service the socket.
+  // Called from handle_events(): pace any pending corner-home, then service
+  // the socket. Homing is spread across polls so the guest drains each PS/2
+  // packet before the next arrives (mouse_motion accumulates into one async
+  // delta, so a burst would merge and cancel against the following move).
   void poll()
   {
+    if (m_home_polls > 0)
+    {
+      inject_mouse(-kHomeStep, -kHomeStep);
+      if (--m_home_polls == 0)
+      {
+        m_bx = 0;
+        m_by = 0;
+      }
+    }
     if (m_client < 0)
       accept_client();
     if (m_client >= 0)
@@ -99,8 +111,12 @@ private:
   std::string m_rx;
   unsigned m_w = 0, m_h = 0;
 
-  // Open-loop pointer state: believed screen position and a corner-home flag.
-  bool m_need_home = true;
+  // Open-loop pointer state: believed screen position, plus a paced corner-
+  // home countdown (polls of a fixed slam toward the top-left, enough to
+  // clamp the cursor to (0,0) from anywhere on screen).
+  static constexpr int kHomeStep = 96;  // px per poll during homing
+  int m_home_polls = 0;
+  bool m_homed = false;
   int m_bx = 0, m_by = 0;
   unsigned m_buttons = 0;
 
@@ -147,7 +163,10 @@ private:
     set_nonblock(c);
     m_client = c;
     m_rx.clear();
-    m_need_home = true;
+    // Schedule a paced corner-home: enough poll steps to walk the whole
+    // screen diagonal to the top-left, plus margin.
+    m_home_polls = (int)(m_w > m_h ? m_w : m_h) / kHomeStep + 4;
+    m_homed = false;
     m_buttons = 0;
     char banner[128];
     snprintf(banner, sizeof(banner),
@@ -295,19 +314,17 @@ private:
       theKeyboard->mouse_motion(screen_dx, -screen_dy, 0, m_buttons);
   }
 
-  // Absolute move, open-loop against the believed position. With the guest at
-  // 1:1 motion the delta lands exactly, so the believed position stays true.
+  // Absolute move, open-loop against the believed position. One delta per
+  // target: the guest is configured for 1:1 pointer motion (no acceleration,
+  // baked into the golden), so the exact remaining delta lands exactly and
+  // the believed position stays true. A move issued while the corner-home is
+  // still pacing is dropped (believed is not yet valid); the streamhost
+  // resends the current target continuously, so the first post-home move
+  // lands correctly.
   void move_abs(int tx, int ty)
   {
-    if (m_need_home)
-    {
-      // Slam far past the top-left so the guest clamps the cursor to (0,0),
-      // establishing a known origin, then move to the target from there.
-      inject_mouse(-(int)m_w - 256, -(int)m_h - 256);
-      m_bx = 0;
-      m_by = 0;
-      m_need_home = false;
-    }
+    if (m_home_polls > 0)
+      return;
     inject_mouse(tx - m_bx, ty - m_by);
     m_bx = tx;
     m_by = ty;
