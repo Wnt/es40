@@ -100,6 +100,7 @@
 #include <SDL3/SDL.h>
 
 #include "sdl_fonts.h"
+#include "shmfb.h"
 
 enum
 {
@@ -193,6 +194,12 @@ static u32          convertStringToSDLKey(const char* string);
 static SDL_Window*   sdl_window = NULL;
 static SDL_Renderer* sdl_renderer = NULL;
 static SDL_Texture*  sdl_texture = NULL;
+
+// Headless capture: when ES40_SHM_PATH is set, every frame is also published
+// into the streamhost IFB1 shared-memory format. Initialised lazily on the
+// first frame so it is inert for ordinary SDL runs.
+static CShmFramebuffer* shm_fb = NULL;
+static bool             shm_fb_tried = false;
 
 
 SDL_Event           sdl_event;
@@ -528,6 +535,18 @@ void bx_sdl_gui_c::specific_init(unsigned x_tilesize, unsigned y_tilesize)
 
 void bx_sdl_gui_c::graphics_frame_update(const u32* pixels, unsigned width, unsigned height)
 {
+	// Headless capture path: publish to shm regardless of whether a window
+	// exists (the SDL dummy video driver has no texture/renderer). The S3
+	// render loop only calls us on a real frame change, so every published
+	// frame is genuinely dirty.
+	if (!shm_fb_tried)
+	{
+		shm_fb = CShmFramebuffer::create_if_enabled();
+		shm_fb_tried = true;
+	}
+	if (shm_fb)
+		shm_fb->publish(pixels, width, height);
+
 	if (!sdl_texture || !sdl_renderer)
 		return;
 
@@ -1118,6 +1137,19 @@ void bx_sdl_gui_c::dimension_update(unsigned x, unsigned y, unsigned fheight,
 	SDL_DisplayID display;
 	float scaled_x, scaled_y;
 	float content_scale = 1.0f;
+
+	// Headless capture: with ES40_SHM_PATH set the frame goes to shm and
+	// there is no window to size. Record the geometry the mouse math needs
+	// and skip every SDL window/renderer/texture call, so the emulator runs
+	// with no window (SDL_VIDEODRIVER=dummy) and no X server.
+	if (getenv("ES40_SHM_PATH"))
+	{
+		res_x = x;
+		res_y = y;
+		half_res_x = x / 2;
+		half_res_y = y / 2;
+		return;
+	}
 
 	if (sdl_texture)
 	{
