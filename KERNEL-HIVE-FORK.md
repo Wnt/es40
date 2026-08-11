@@ -20,6 +20,11 @@ log is the authoritative list; so far:
   center-relative deltas; this mode derives PS/2 deltas by differencing
   successive window positions instead. Default off; physical-pointer
   behaviour unchanged.
+- `gui: headless shm framebuffer export` + `gui: headless mamectl/1 input
+  socket` — the direct-capture path (no X server, no window): es40 publishes
+  its framebuffer to shared memory in the streamhost IFB1 format and accepts
+  input over a mamectl/1 unix socket, so a streamhost captures and drives it
+  exactly like the MAME IRIX tile. Runs under SDL_VIDEODRIVER=dummy.
 - `JIT: eliminate spurious chain exits and run-once compilation overhead`
   — interrupt-poll kicks gated on deliverability, delayed-IRQ countdowns
   drained at chain granularity, and first-sight blocks left interpreted
