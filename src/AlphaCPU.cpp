@@ -997,11 +997,14 @@ void CAlphaCPU::jit_run(int budget)
 					(unsigned long long) b->phys, (unsigned long long) start_phys);
 		}
 
-		// Run the compiled safe prefix natively when available -- but not while an
-		// interrupt or delayed timer is pending. Compiled blocks don't run the
-		// per-instruction polls, so run the interpreter.
+		// Run the compiled safe prefix natively when available -- but not while
+		// an interrupt is pending (compiled blocks don't run the delivery
+		// poll). Delayed-IRQ countdowns (check_timers) no longer gate native
+		// execution: they drain at chain granularity after each compiled run
+		// below — the old gate sent every countdown through ~delay-many
+		// interpreted instructions.
 		if (b && b->code && b->phys == start_phys && (int)b->prefix_len <= budget
-			&& !state.check_int && !state.check_timers
+			&& !state.check_int
 			&& (!(b->tag & 1) || state.sde))   // PALmode block: its shadow-register remap assumes SDE
 		{
 			b->vgen = m_jit->vgen();   // phys validated + lookup proved flush-fresh: refresh the chain epoch
@@ -1455,6 +1458,33 @@ void CAlphaCPU::jit_run(int budget)
 			state.instruction_count += done;
 			cc_large += (u64)done * cc_per_instruction;
 			budget -= done;
+
+			// Drain delayed-IRQ countdowns by the instructions the chain just
+			// ran, instead of gating native execution while they pend. The
+			// fire time gains up-to-chain-length jitter (µs-scale emulated
+			// bus-settle pacing, not architecture) and an expiry raises
+			// check_int, which the emitted boundary gate still honors.
+			if (state.check_timers && done > 0)
+			{
+				state.check_timers = false;
+				for (int ti = 0; ti < 6; ti++)
+				{
+					if (state.irq_h_timer[ti])
+					{
+						if (state.irq_h_timer[ti] <= (int)done)
+						{
+							state.irq_h_timer[ti] = 0;
+							state.eir |= (U64(0x1) << ti);
+							state.check_int = true;
+						}
+						else
+						{
+							state.irq_h_timer[ti] -= (int)done;
+							state.check_timers = true;
+						}
+					}
+				}
+			}
 #ifdef JIT_STATS
 			cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0, _comp_tsc, 0));   // don't bill the stats-print stall to the wall-clock RPCC
 #endif
@@ -1485,7 +1515,13 @@ void CAlphaCPU::jit_run(int budget)
 		cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(0, n, 0, jit_rdtsc() - _interp_t0));   // don't bill the stats-print stall to the wall-clock RPCC
 #endif
 		// Record only translatable block starts (a translation miss left have_phys false).
-		if (have_phys && state.pc != expected)
+		// Compile on the SECOND encounter only (see m_cold_seen): the first
+		// pass of run-once code stays interpreted and skips the compiler.
+		const u32 cold_h = (u32)((start_phys >> 2) & (kColdSeenSize - 1));
+		const bool seen_before = (m_cold_seen[cold_h] == start_phys);
+		if (!seen_before)
+			m_cold_seen[cold_h] = start_phys;
+		if (have_phys && seen_before && state.pc != expected)
 		{
 			CJitEngine::JitBlock* nb = m_jit->record(start_virt, start_phys, start_asn, start_asm, n, (const uint8_t*)dram_ptr);
 			if (!nb->compiled)
@@ -2128,8 +2164,8 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 	// ASN write (bit 0, dpc flush + asn-epoch bump) is never compiled -- classify() routes it to OP_NONE.
 	if ((function & 0xc0) == 0x40)
 	{
-		if (function & 2) { cpu->state.aster = (int)(value >> 5) & 0xf; cpu->state.check_int = true; }
-		if (function & 4) { cpu->state.astrr = (int)(value >> 9) & 0xf; cpu->state.check_int = true; }
+		if (function & 2) { cpu->state.aster = (int)(value >> 5) & 0xf; cpu->kick_int_if_pending(); }
+		if (function & 4) { cpu->state.astrr = (int)(value >> 9) & 0xf; cpu->kick_int_if_pending(); }
 		if (function & 8)    cpu->state.ppcen = (int)(value >> 1) & 1;
 		if (function & 16)   cpu->state.fpen = (int)(value >> 2) & 1;
 		return;
@@ -2144,11 +2180,11 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 	case 0x13: cpu->flush_icache(); break;                                      // IC_FLUSH (lazy flush + deferred reclaim)
 	case 0x09:                                                                   // CM (current mode)
 		cpu->state.cm = (int)(value >> 3) & 3;
-		cpu->state.check_int = true;
+		cpu->kick_int_if_pending();
 		break;
 	case 0x0b:                                                                   // IER_CM: write CM, then fall into IER
 		cpu->state.cm = (int)(value >> 3) & 3;
-		cpu->state.check_int = true;
+		cpu->kick_int_if_pending();
 		[[fallthrough]];
 	case 0x0a:                                                                   // IER
 		cpu->state.asten = (int)(value >> 13) & 1;
@@ -2157,11 +2193,11 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 		cpu->state.cren = (int)(value >> 31) & 1;
 		cpu->state.slen = (int)(value >> 32) & 1;
 		cpu->state.eien = (int)(value >> 33) & 0x3f;
-		cpu->state.check_int = true;                       // newly enabled pending ints must be polled
+		cpu->kick_int_if_pending();                        // poll only if a pending source could now deliver
 		break;
 	case 0x0c:                                                                   // SIRR (software interrupt request)
 		cpu->state.sir = (int)(value >> 13) & 0xfffe;
-		cpu->state.check_int = true;
+		cpu->kick_int_if_pending();
 		break;
 	case 0x11:                                                                   // I_CTL (terminator; mirrors DO_HW_MTPR)
 		cpu->state.i_ctl_other = (value & U64(0x00000000006e2f67)) | U64(0x0000000000100000);  // bit 20 hardwired-on (EV6/EV68)

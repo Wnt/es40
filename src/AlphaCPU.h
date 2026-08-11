@@ -258,6 +258,7 @@ public:
   virtual int   SaveState(FILE* f);
   virtual int   RestoreState(FILE* f);
   void          irq_h(int number, bool assert, int delay);
+  void          kick_int_if_pending();
   void          idle_nap();
   int           get_cpuid();
   void          flush_icache();
@@ -519,6 +520,17 @@ private:
       data_page_cache[1][i].host_base = 0;
     }
   }
+
+  // Cold-block seen-filter: compile a block only on its second encounter.
+  // App launches sweep megabytes of run-once init code through the miss
+  // path (measured ~390k cold compiles per 100M instructions during a
+  // Computer Management launch, compile cost dominating the phase); a
+  // run-once block never repays its compile. Direct-mapped tags keyed by
+  // physical block start — a collision delays or hastens one compile by
+  // one encounter, both harmless. Host-side only; not in the savestate.
+  static constexpr int kColdSeenBits = 14;
+  static constexpr int kColdSeenSize = 1 << kColdSeenBits;
+  u64 m_cold_seen[kColdSeenSize] = {};
 
   // ASN switch: bump the chain epoch so compiled chain edges revalidate through the asn-keyed
   // lookup paths (the chain guard checks tag+epoch only). No-op in non-JIT builds.
@@ -925,6 +937,32 @@ inline u64 CAlphaCPU::va_form(u64 address, bool bIBOX)
 inline int CAlphaCPU::get_cpuid()
 {
   return state.iProcNum;
+}
+
+/**
+ * Force an interrupt poll only if one could actually deliver: an IER/CM/
+ * AST-enable write makes an interrupt deliverable only when a raw source
+ * (external line, software request, counter/error/serial request, or a
+ * requested-and-enabled AST) is already pending — with all of them clear
+ * the forced poll is a guaranteed no-op. NT's HAL rewrites IER on every
+ * IRQL transition (every spinlock acquire/release), so an unconditional
+ * check_int kick here forced a compiled-chain exit plus an interpreted
+ * block every ~25 instructions under load (JIT_STATS: 100% gate bails,
+ * interp 22% of time). Sources going pending while masked still raise
+ * check_int through irq_h()/SIRR independently of this gate.
+ **/
+inline void CAlphaCPU::kick_int_if_pending()
+{
+  // Mirror the delivery poll's predicate EXACTLY (pending AND enabled):
+  // raw-pending alone is not enough — during load NT constantly holds
+  // DPCs pending-but-masked at raised IRQL (sir nonzero, sien masked), so
+  // gating on raw sources still kicked on every IRQL write and the chain
+  // exits returned (measured: 29 MIPS / dispatch 59% in the load phase).
+  // A masked write cannot deliver; the later unmask write kicks here.
+  if((state.eien & state.eir) || (state.sien & state.sir)
+     || (state.asten
+         && (state.aster & state.astrr & ((1 << (state.cm + 1)) - 1))))
+    state.check_int = true;
 }
 
 /**

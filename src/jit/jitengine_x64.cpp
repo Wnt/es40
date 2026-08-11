@@ -2006,7 +2006,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   auto emit_gate = [&](Label& lbl) {
     a.mov(x86::rax, x86::qword_ptr(x86::rsp, 40)); a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.jit_budget)); a.jge(lbl);
     a.cmp(x86::byte_ptr(x86::rbp, m_off.check_int), imm(0));     a.jne(lbl);
-    a.cmp(x86::byte_ptr(x86::rbp, m_off.check_timers), imm(0));  a.jne(lbl);
+    // check_timers no longer exits the chain: delayed-IRQ countdowns drain
+    // at chain granularity in the dispatcher; expiry raises check_int.
   };
   // Cached direct link: tail straight into our cached successor's body via its SNAPSHOT
   // {tag, vgen, body} in OUR link slots so one cache line, no dereference into the successor's
