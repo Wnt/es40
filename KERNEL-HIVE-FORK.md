@@ -20,6 +20,16 @@ log is the authoritative list; so far:
   center-relative deltas; this mode derives PS/2 deltas by differencing
   successive window positions instead. Default off; physical-pointer
   behaviour unchanged.
+- `JIT: eliminate spurious chain exits and run-once compilation overhead`
+  — interrupt-poll kicks gated on deliverability, delayed-IRQ countdowns
+  drained at chain granularity, and first-sight blocks left interpreted
+  (run-once code never repays a compile). Measured on the exhibit's heavy
+  UI benchmark: Computer Management launch 24.4 s → 10.3 s (2.37×).
+- `Savestate: make restore actually work` + `save-and-exit / ES40_RESTORE`
+  — four restore-blocking bugs fixed (hang on empty drives, BAR mappings
+  not replayed, S3 video state absent, SDL texture lost on thread
+  recreate) plus an atomic golden-bake menu option and instant resume
+  from a state file at startup.
 - `Disk: lock-free empty check for the media-mailbox poll` — the emulation
   loop polled every disk's operator-media-change mailbox through two mutexes
   and a heap-allocating `std::deque` per drive per iteration, just to find it
