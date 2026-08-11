@@ -854,6 +854,7 @@ void CAlphaCPU::host_freeze_reanchor(std::chrono::steady_clock::time_point now,
 	if (thePMU)
 		thePMU->host_freeze_shift_anchor(gap_us);
 	printf("%%CPU-I-FREEZE: absorbed a %ld s host freeze; guest clocks resume where they stopped.\n", gap_s);
+	fflush(stdout);   // the tile logs to a file (block-buffered) — the operator reads this line to confirm a resume
 }
 
 void CAlphaCPU::jit_run(int budget)

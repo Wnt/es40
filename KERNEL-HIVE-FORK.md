@@ -40,6 +40,15 @@ log is the authoritative list; so far:
   and a heap-allocating `std::deque` per drive per iteration, just to find it
   empty. An atomic empty-flag makes the poll a single load; measured −25% to
   the Windows 2000 kernel-splash boot checkpoint.
+- `cpu/ali/pmu: absorb host-side freezes` — every guest-visible clock (the
+  wall-clock RPCC, the Cchip interval timer, the TOY/RTC, the ACPI PM timer)
+  is derived from the host's monotonic clock, which keeps running while the
+  process is SIGSTOPped by a supervisor (streamhost idle-pause), halted in a
+  debugger, or suspended with the host. A wall-clock gap ≥ 5 s at a cc sync
+  point cannot be guest execution, so it is treated as a host-side freeze:
+  zero cycles billed, the timer schedule re-anchored, and the RTC offset
+  shifted back — the guest resumes with every clock exactly where it stopped,
+  the same semantics a QEMU guest gets from QMP stop/cont.
 
 Each patch is its own commit with a descriptive subject and body, so any of
 them can be read, reviewed, or cherry-picked independently — see the commit
