@@ -328,7 +328,16 @@ void CSerial::init()
 	int optval = 1;
 	setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, (char*)&optval,
 		sizeof(optval));
-	bind(listenSocket, (struct sockaddr*)&Address, sizeof(Address));
+	// An unchecked bind failure used to fall through to listen(), which then
+	// succeeds on a KERNEL-ASSIGNED ephemeral port: the guest waits forever for
+	// a serial client that is connecting to the configured port. Seen live when
+	// a relaunch raced the dying predecessor's listener. Fail loudly instead.
+	if (bind(listenSocket, (struct sockaddr*)&Address, sizeof(Address)) != 0)
+	{
+		printf("%s: cannot bind listen port %d: %s.\n", devid_string, listenPort,
+			strerror(errno));
+		FAILURE(Configuration, "serial listen-port bind failed");
+	}
 	listen(listenSocket, 8);
 
 	printf("%s: Waiting for connection on port %d.\n", devid_string, listenPort);

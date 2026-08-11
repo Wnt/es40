@@ -7,7 +7,9 @@
  *
  * WIRE (line protocol; the client stamps each verb with a sequence number):
  *   server -> client, once per connection:
- *     HELLO mamectl/1 1 w2kalpha caps=natkbd,savest screen=WxH
+ *     HELLO mamectl/1 1 <tile> caps=natkbd,savest screen=WxH
+ *     (<tile> is ES40_TILE_NAME, default "es40"; clients only check the
+ *      protocol prefix)
  *   client -> server:
  *     <seq> MOVEA <x> <y>          absolute pointer target (screen pixels)
  *     <seq> MOVEP <dx> <dy>        relative pointer delta
@@ -27,7 +29,11 @@
  * targeting is pixel-accurate with no readback.
  *
  * Everything runs from the gui thread's handle_events() (~50 Hz); the socket
- * is non-blocking, one client at a time, reconnectable.
+ * is non-blocking and MULTI-CLIENT (up to kMaxClients concurrently): the
+ * streamhost daemon can stay attached while an operator tool injects input
+ * beside it. Pointer/button state is global (one guest cursor); every new
+ * connection re-schedules the paced corner-home, which re-syncs the shared
+ * open-loop believed position for everyone.
  */
 #ifndef ES40_GUI_CTLSOCK_H
 #define ES40_GUI_CTLSOCK_H
@@ -41,6 +47,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <vector>
 
 #include "../Keyboard.h"
 #include "../VGA.h"
@@ -69,8 +76,9 @@ public:
 
   ~CCtlSock()
   {
-    if (m_client >= 0)
-      close(m_client);
+    for (Client& c : m_clients)
+      if (c.fd >= 0)
+        close(c.fd);
     if (m_listen >= 0)
       close(m_listen);
     if (!m_path.empty())
@@ -98,27 +106,41 @@ public:
         m_by = 0;
       }
     }
-    if (m_client < 0)
-      accept_client();
-    if (m_client >= 0)
-      drain_client();
+    accept_clients();
+    for (Client& c : m_clients)
+      drain_client(c);
+    sweep_closed();
   }
 
 private:
+  struct Client
+  {
+    int fd = -1;
+    std::string rx;
+  };
+
+  static constexpr size_t kMaxClients = 4;
+
   int m_listen = -1;
-  int m_client = -1;
+  std::vector<Client> m_clients;
   std::string m_path;
-  std::string m_rx;
   unsigned m_w = 0, m_h = 0;
 
   // Open-loop pointer state: believed screen position, plus a paced corner-
   // home countdown (polls of a fixed slam toward the top-left, enough to
-  // clamp the cursor to (0,0) from anywhere on screen).
+  // clamp the cursor to (0,0) from anywhere on screen). Shared by all
+  // clients — there is only one guest cursor.
   static constexpr int kHomeStep = 96;  // px per poll during homing
   int m_home_polls = 0;
   bool m_homed = false;
   int m_bx = 0, m_by = 0;
   unsigned m_buttons = 0;
+
+  static const char* tile_name()
+  {
+    const char* n = getenv("ES40_TILE_NAME");
+    return (n && *n) ? n : "es40";
+  }
 
   bool listen_on(const char* path)
   {
@@ -137,7 +159,7 @@ private:
       m_listen = -1;
       return false;
     }
-    if (listen(m_listen, 1) != 0)
+    if (listen(m_listen, (int)kMaxClients) != 0)
     {
       close(m_listen);
       m_listen = -1;
@@ -155,74 +177,98 @@ private:
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);
   }
 
-  void accept_client()
+  void accept_clients()
   {
-    int c = accept(m_listen, nullptr, nullptr);
-    if (c < 0)
+    for (;;)
+    {
+      int c = accept(m_listen, nullptr, nullptr);
+      if (c < 0)
+        return;
+      if (m_clients.size() >= kMaxClients)
+      {
+        printf("%%CTL-W-FULL: mamectl client refused (%zu attached)\n",
+            m_clients.size());
+        close(c);
+        continue;
+      }
+      set_nonblock(c);
+      Client cl;
+      cl.fd = c;
+      m_clients.push_back(cl);
+      // Schedule a paced corner-home: enough poll steps to walk the whole
+      // screen diagonal to the top-left, plus margin. Re-syncs the shared
+      // believed position for every attached client.
+      m_home_polls = (int)(m_w > m_h ? m_w : m_h) / kHomeStep + 4;
+      m_homed = false;
+      m_buttons = 0;
+      char banner[160];
+      snprintf(banner, sizeof(banner),
+          "HELLO mamectl/1 1 %s caps=natkbd,savest screen=%ux%u\n",
+          tile_name(), m_w, m_h);
+      (void)!write(c, banner, strlen(banner));
+      printf("%%CTL-I-CONN: mamectl client connected (%zu attached)\n",
+          m_clients.size());
+    }
+  }
+
+  static void close_client(Client& c)
+  {
+    if (c.fd >= 0)
+      close(c.fd);
+    c.fd = -1;
+    c.rx.clear();
+  }
+
+  void sweep_closed()
+  {
+    for (size_t i = m_clients.size(); i-- > 0;)
+      if (m_clients[i].fd < 0)
+        m_clients.erase(m_clients.begin() + (long)i);
+  }
+
+  void drain_client(Client& c)
+  {
+    if (c.fd < 0)
       return;
-    set_nonblock(c);
-    m_client = c;
-    m_rx.clear();
-    // Schedule a paced corner-home: enough poll steps to walk the whole
-    // screen diagonal to the top-left, plus margin.
-    m_home_polls = (int)(m_w > m_h ? m_w : m_h) / kHomeStep + 4;
-    m_homed = false;
-    m_buttons = 0;
-    char banner[128];
-    snprintf(banner, sizeof(banner),
-        "HELLO mamectl/1 1 w2kalpha caps=natkbd,savest screen=%ux%u\n", m_w,
-        m_h);
-    (void)!write(m_client, banner, strlen(banner));
-    printf("%%CTL-I-CONN: mamectl client connected\n");
-  }
-
-  void close_client()
-  {
-    if (m_client >= 0)
-      close(m_client);
-    m_client = -1;
-    m_rx.clear();
-  }
-
-  void drain_client()
-  {
     char buf[1024];
     for (;;)
     {
-      ssize_t n = read(m_client, buf, sizeof(buf));
+      ssize_t n = read(c.fd, buf, sizeof(buf));
       if (n > 0)
       {
-        m_rx.append(buf, (size_t)n);
+        c.rx.append(buf, (size_t)n);
         size_t nl;
-        while ((nl = m_rx.find('\n')) != std::string::npos)
+        while ((nl = c.rx.find('\n')) != std::string::npos)
         {
-          std::string line = m_rx.substr(0, nl);
-          m_rx.erase(0, nl + 1);
-          handle_line(line);
+          std::string line = c.rx.substr(0, nl);
+          c.rx.erase(0, nl + 1);
+          handle_line(c, line);
         }
         continue;
       }
       if (n == 0)
       {
-        close_client();
+        close_client(c);
         return;
       }
       // n < 0: EAGAIN means done for now; anything else drops the client.
       if (errno != EAGAIN && errno != EWOULDBLOCK)
-        close_client();
+        close_client(c);
       return;
     }
   }
 
-  void ack(long seq, bool ok, const char* reason = "")
+  static void ack(Client& c, long seq, bool ok, const char* reason = "")
   {
+    if (c.fd < 0)
+      return;
     char out[96];
     int len = ok ? snprintf(out, sizeof(out), "%ld OK\n", seq)
                  : snprintf(out, sizeof(out), "%ld ERR %s\n", seq, reason);
-    (void)!write(m_client, out, (size_t)len);
+    (void)!write(c.fd, out, (size_t)len);
   }
 
-  void handle_line(const std::string& line)
+  void handle_line(Client& c, const std::string& line)
   {
     // "<seq> VERB args..."
     const char* s = line.c_str();
@@ -240,10 +286,10 @@ private:
       if (sscanf(verb + 6, "%d %d", &x, &y) == 2)
       {
         move_abs(clampi(x, 0, (int)m_w - 1), clampi(y, 0, (int)m_h - 1));
-        ack(seq, true);
+        ack(c, seq, true);
       }
       else
-        ack(seq, false, "badargs");
+        ack(c, seq, false, "badargs");
       return;
     }
     if (!strncmp(verb, "MOVEP ", 6))
@@ -252,10 +298,10 @@ private:
       if (sscanf(verb + 6, "%d %d", &dx, &dy) == 2)
       {
         inject_mouse(dx, dy);
-        ack(seq, true);
+        ack(c, seq, true);
       }
       else
-        ack(seq, false, "badargs");
+        ack(c, seq, false, "badargs");
       return;
     }
     if (!strncmp(verb, "DOWN", 4) || !strncmp(verb, "UP", 2))
@@ -265,7 +311,7 @@ private:
       unsigned bit = btn == '1' ? 1u : btn == '2' ? 2u : btn == '3' ? 4u : 0u;
       if (!bit)
       {
-        ack(seq, false, "badbtn");
+        ack(c, seq, false, "badbtn");
         return;
       }
       if (down)
@@ -273,7 +319,7 @@ private:
       else
         m_buttons &= ~bit;
       inject_mouse(0, 0); // restate buttons with no motion
-      ack(seq, true);
+      ack(c, seq, true);
       return;
     }
     if (!strncmp(verb, "KEY ", 4))
@@ -286,19 +332,19 @@ private:
       {
         u32 code = field_to_bxkey(field);
         if (code == BX_KEYMAP_UNKNOWN)
-          ack(seq, false, "unmappedkey");
+          ack(c, seq, false, "unmappedkey");
         else
         {
           theKeyboard->gen_scancode(code | (downi ? BX_KEY_PRESSED
                                                   : BX_KEY_RELEASED));
-          ack(seq, true);
+          ack(c, seq, true);
         }
       }
       else
-        ack(seq, false, "badargs");
+        ack(c, seq, false, "badargs");
       return;
     }
-    ack(seq, false, "unknownverb");
+    ack(c, seq, false, "unknownverb");
   }
 
   static int clampi(int v, int lo, int hi)
