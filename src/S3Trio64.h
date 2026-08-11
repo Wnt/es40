@@ -326,6 +326,7 @@ private:
   //  - PauseAck is raised by the S3 thread once it is safely paused
   std::atomic<bool> PauseThread{ false };
   std::atomic<bool> PauseAck{ false };
+  bool m_final_stop = false;   // set only by the destructor: allow real thread stop
 
   // screen refresh stuff
   std::chrono::steady_clock::time_point m_last_refresh_time;

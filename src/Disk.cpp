@@ -2849,6 +2849,15 @@ static int  pri16[16][6] = { {4,0,0,0, 0, 0}, //16
 static off_t_large get_primes(off_t_large value, int pri[54])
 {
 	int i;
+
+	// 0 % p == 0 for every p, so factorizing zero never terminates.
+	if (value == 0)
+	{
+		for (i = 0; i < 54; i++)
+			pri[i] = 0;
+		return 0;
+	}
+
 	for (i = 0; i < 54; i++)
 	{
 		pri[i] = 0;
@@ -2877,6 +2886,14 @@ void CDisk::determine_layout()
 	long  c_heads = 0;
 	bool  b;
 	int   prime;
+
+	// An empty drive (a CD-ROM with no medium, or freshly restored state
+	// for one) has byte_size 0 and possibly block_size 0: get_lba_size()
+	// would divide by zero, and get_primes(0) used to spin forever —
+	// RestoreState calls this unconditionally and hung the whole restore.
+	// There is no geometry to derive; keep whatever is there.
+	if (state.block_size == 0 || get_lba_size() == 0)
+		return;
 
 	get_primes(get_lba_size(), disk_primes);
 

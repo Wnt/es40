@@ -670,6 +670,31 @@ int CPCIDevice::RestoreState(FILE* f)
 		return -1;
 	}
 
+	// The restored config space describes BAR mappings that were
+	// established by guest config writes — side effects a raw fread does
+	// not replay. Without re-registering them the device's MMIO/IO decode
+	// stays wherever the pre-restore firmware left it (symptom: restored
+	// guest runs but the S3 framebuffer BAR is unmapped — black screen).
+	// register_bar reads pci_state itself for 64-bit BAR pairing, so feed
+	// it each restored BAR exactly like the config-write path does.
+	int func, bar;
+	for (func = 0; func < 8; func++)
+	{
+		for (bar = 0; bar < 6; bar++)
+		{
+			const u32 mask = endian_32(pci_state.config_mask[func][4 + bar]);
+			if (mask == 0)
+				continue;
+			register_bar(func, bar,
+				endian_32(pci_state.config_data[func][4 + bar]), mask);
+		}
+
+		const u32 rom_mask = endian_32(pci_state.config_mask[func][0x30 / 4]);
+		if (rom_mask != 0)
+			register_bar(func, 6,
+				endian_32(pci_state.config_data[func][0x30 / 4]), rom_mask);
+	}
+
 	printf("%s: %d PCI bytes restored.\n", devid_string, (int)ss);
 	return 0;
 }

@@ -2931,7 +2931,9 @@ void CS3Trio64::recompute_params_clock(int divisor, int xtal)
  **/
 void CS3Trio64::start_threads()
 {
-	// Resume after reset if the thread already exists
+	// Resume after reset/menu if the thread already exists; the pause path
+	// cleared the window, so force a full repaint on resume.
+	state.vga_mem_updated = 1;
 	PauseThread.store(false, std::memory_order_release);
 
 	if (!myThread)
@@ -2948,9 +2950,15 @@ void CS3Trio64::start_threads()
  **/
 void CS3Trio64::stop_threads()
 {
-	// During firmware reset, do NOT kill the S3 thread (it owns the SDL window).
-	// Just pause it so the window stays alive.
-	if (cSystem && cSystem->IsResetInProgress())
+	// Never kill the S3 thread except at final destruction: it owns the SDL
+	// window, and a recreated thread re-runs bx_gui->init(), which drops the
+	// texture/renderer. Nothing recreates them until the next RESIZE, so if
+	// the display dimensions do not change (savestate restore into the same
+	// mode, firmware reset), every subsequent frame upload is silently
+	// discarded — the window goes permanently black while the guest runs
+	// fine. Pausing keeps the SDL objects alive across stop/start cycles
+	// (serial-menu savestate load, firmware reset).
+	if (!m_final_stop)
 	{
 		PauseThread.store(true, std::memory_order_release);
 
@@ -2985,6 +2993,7 @@ void CS3Trio64::stop_threads()
  **/
 CS3Trio64::~CS3Trio64()
 {
+	m_final_stop = true;
 	stop_threads();
 }
 
@@ -3780,6 +3789,13 @@ void CS3Trio64::check_state()
 static u32  s3_magic1 = 0x53338811;
 static u32  s3_magic2 = 0x88115333;
 
+// Video-state section appended 2026-08: the VGA/S3 register files and VRAM
+// live outside `state`, so without this section a restored guest came back
+// to a black screen (and `state` even carried a raw VRAM pointer through
+// the file). Own magic pair so a mismatch fails loudly.
+static u32  s3_video_magic1 = 0x53335631;   // "S3V1"
+static u32  s3_video_magic2 = 0x31563353;
+
 /**
  * Save state to a Virtual Machine State file.
  **/
@@ -3795,7 +3811,25 @@ int CS3Trio64::SaveState(FILE* f)
 	fwrite(&ss, sizeof(long), 1, f);
 	fwrite(&state, sizeof(state), 1, f);
 	fwrite(&s3_magic2, sizeof(u32), 1, f);
-	printf("%s: %d bytes saved.\n", devid_string, (int)ss);
+
+	// Video state: register files (vga + s3 extensions) and VRAM contents.
+	// The VRAM allocation is vga.memory / vga.svga_intf.vram_size — the
+	// SS3_state memory/memsize fields are vestigial and stay zero.
+	long vs = sizeof(vga);
+	fwrite(&s3_video_magic1, sizeof(u32), 1, f);
+	fwrite(&vs, sizeof(long), 1, f);
+	fwrite(&vga, sizeof(vga), 1, f);
+	vs = sizeof(s3);
+	fwrite(&vs, sizeof(long), 1, f);
+	fwrite(&s3, sizeof(s3), 1, f);
+	vs = (long)vga.svga_intf.vram_size;
+	fwrite(&vs, sizeof(long), 1, f);
+	if (vs > 0)
+		fwrite(vga.memory, (size_t)vs, 1, f);
+	fwrite(&s3_video_magic2, sizeof(u32), 1, f);
+
+	printf("%s: %d bytes saved (+video %d + vram %ld).\n", devid_string,
+		(int)ss, (int)(sizeof(vga) + sizeof(s3)), vs);
 	return 0;
 }
 
@@ -3839,10 +3873,23 @@ int CS3Trio64::RestoreState(FILE* f)
 		return -1;
 	}
 
+	// state carries a raw VRAM pointer + size; both must survive the fread
+	// (a pointer from a file is garbage by definition).
+	u8* vram = state.memory;
+	const u32 vram_size = state.memsize;
+
 	fread(&state, sizeof(state), 1, f);
 	if (r != 1)
 	{
 		printf("%s: unexpected end of file!\n", devid_string);
+		return -1;
+	}
+
+	state.memory = vram;
+	if (state.memsize != vram_size)
+	{
+		printf("%s: VRAM SIZE does not match (%u vs %u)!\n", devid_string,
+			state.memsize, vram_size);
 		return -1;
 	}
 
@@ -3859,7 +3906,93 @@ int CS3Trio64::RestoreState(FILE* f)
 		return -1;
 	}
 
-	printf("%s: %d bytes restored.\n", devid_string, (int)ss);
+	// Video-state section (register files + VRAM), with its own magics.
+	long vs;
+	printf("%s: video section @%ld (sizeof vga=%zu s3=%zu memsize=%u)\n",
+		devid_string, ftell(f), sizeof(vga), sizeof(s3), state.memsize);
+	r = fread(&m1, sizeof(u32), 1, f);
+	if (r != 1 || m1 != s3_video_magic1)
+	{
+		printf("%s: VIDEO MAGIC 1 does not match!\n", devid_string);
+		return -1;
+	}
+
+	r = fread(&vs, sizeof(long), 1, f);
+	if (r != 1 || vs != (long)sizeof(vga))
+	{
+		printf("%s: VGA STRUCT SIZE does not match!\n", devid_string);
+		return -1;
+	}
+
+	// vga.memory is a live pointer to the VRAM allocation — it must
+	// survive the struct fread (a pointer from a file is garbage).
+	u8* vga_vram = vga.memory;
+	const size_t vga_vram_size = vga.svga_intf.vram_size;
+
+	r = fread(&vga, sizeof(vga), 1, f);
+	if (r != 1)
+	{
+		printf("%s: unexpected end of file (vga struct)!\n", devid_string);
+		return -1;
+	}
+
+	vga.memory = vga_vram;
+	if (vga.svga_intf.vram_size != vga_vram_size)
+	{
+		printf("%s: VRAM allocation size mismatch (%zu vs %zu)!\n",
+			devid_string, vga.svga_intf.vram_size, vga_vram_size);
+		return -1;
+	}
+
+	r = fread(&vs, sizeof(long), 1, f);
+	if (r != 1 || vs != (long)sizeof(s3))
+	{
+		printf("%s: S3 STRUCT SIZE does not match!\n", devid_string);
+		return -1;
+	}
+
+	r = fread(&s3, sizeof(s3), 1, f);
+	if (r != 1)
+	{
+		printf("%s: unexpected end of file (s3 struct)!\n", devid_string);
+		return -1;
+	}
+
+	r = fread(&vs, sizeof(long), 1, f);
+	if (r != 1 || vs != (long)vga.svga_intf.vram_size)
+	{
+		printf("%s: VRAM SECTION SIZE does not match!\n", devid_string);
+		return -1;
+	}
+
+	if (vs > 0)
+	{
+		r = fread(vga.memory, (size_t)vs, 1, f);
+		if (r != 1)
+		{
+			printf("%s: unexpected end of file (vram, %ld bytes @%ld)!\n",
+				devid_string, vs, ftell(f));
+			return -1;
+		}
+	}
+
+	r = fread(&m2, sizeof(u32), 1, f);
+	if (r != 1 || m2 != s3_video_magic2)
+	{
+		printf("%s: VIDEO MAGIC 2 does not match!\n", devid_string);
+		return -1;
+	}
+
+	// Recompute everything derived from the restored registers, and force
+	// a full repaint from the restored VRAM.
+	s3_define_video_mode();
+	recompute_params();
+	palette_update();
+	on_crtc_linear_regs_changed();
+	state.vga_mem_updated = true;
+
+	printf("%s: %d bytes restored (+video +vram %u).\n", devid_string,
+		(int)ss, state.memsize);
 	return 0;
 }
 
