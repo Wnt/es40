@@ -234,6 +234,18 @@ protected:
   virtual uint32_t latch_start_addr() override; // below is MAME's base VGA implementation, but S3 Trio in MAME overrides it with the version we have
   virtual bool get_interlace_mode() override { return BIT(s3.cr42, 5); }
 
+  // HW cursor position for headless pointer homing. cursor_mode bit0 = enable.
+  virtual bool get_hw_cursor(int* x, int* y) override
+  {
+    if (!(s3.cursor_mode & 1))
+      return false;
+    if (x)
+      *x = (int)s3.cursor_x;
+    if (y)
+      *y = (int)s3.cursor_y;
+    return true;
+  }
+
   virtual void palette_update() override;
   virtual void s3_define_video_mode(void);
 

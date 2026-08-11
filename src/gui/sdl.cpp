@@ -101,6 +101,7 @@
 
 #include "sdl_fonts.h"
 #include "shmfb.h"
+#include "ctlsock.h"
 
 enum
 {
@@ -200,6 +201,9 @@ static SDL_Texture*  sdl_texture = NULL;
 // first frame so it is inert for ordinary SDL runs.
 static CShmFramebuffer* shm_fb = NULL;
 static bool             shm_fb_tried = false;
+
+// Headless input: mamectl/1 unix socket, active when ES40_CTL_SOCK is set.
+static CCtlSock*        ctl_sock = NULL;
 
 
 SDL_Event           sdl_event;
@@ -526,6 +530,11 @@ void bx_sdl_gui_c::specific_init(unsigned x_tilesize, unsigned y_tilesize)
 	build_window_titles();
 	clear_hotkey_release_state();
 
+	// Headless input socket (mamectl/1), inert unless ES40_CTL_SOCK is set.
+	// Created before dimension_update so it exists for the first poll; the
+	// real screen size is restated into it on every handle_events().
+	ctl_sock = CCtlSock::create_if_enabled(640, 480);
+
 	// Create the initial window + renderer + texture at 640x480.
 	// dimension_update() will recreate the texture if the resolution changes.
 	dimension_update(640, 480);
@@ -799,6 +808,14 @@ void bx_sdl_gui_c::send_guest_ctrl_alt_delete()
 void bx_sdl_gui_c::handle_events(void)
 {
 	u32 key_event;
+
+	// Headless input: service the mamectl socket (create lazily so it is
+	// inert without ES40_CTL_SOCK, and so screen size is known by first poll).
+	if (ctl_sock)
+	{
+		ctl_sock->set_screen(res_x, res_y);
+		ctl_sock->poll();
+	}
 
 	sdl_media_pump();
 	while (SDL_PollEvent(&sdl_event))

@@ -87,6 +87,11 @@ public:
 
   void set_offset(uint16_t val) { vga.crtc.offset = val; }
   void set_vram_size(size_t vram_size) { vga.svga_intf.vram_size = vram_size; }
+
+  // Hardware-cursor position, for headless absolute-pointer homing (the
+  // ctlsock input path reads it to close the loop against the guest's PS/2
+  // acceleration). Base VGA has no HW cursor; the S3 subclass overrides.
+  virtual bool get_hw_cursor(int* x, int* y) { (void)x; (void)y; return false; }
   //auto vsync_cb() { return m_vsync_cb.bind(); }
   // FIXME: should be protected, but virge_pci.cpp violates this
   //inline uint16_t get_crtc_port() { return BIT(vga.miscellaneous_output, 0) ? 0x3d0 : 0x3b0; }
