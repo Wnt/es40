@@ -435,6 +435,20 @@ int main(int argc, char* argv[])
 		theSystem->LoadROM();
 		theDPR->init();
 
+		// Instant resume: restore a saved state before the main loop ever
+		// runs, skipping SRM/AlphaBIOS/OS boot entirely. The disk images
+		// must be the ones that were current when the state was saved
+		// (bake pairs via serial-menu option 5: save-and-exit).
+		{
+			const char* restore_file = getenv("ES40_RESTORE");
+			if (restore_file && *restore_file)
+			{
+				printf("%%SYS-I-RESTORE: Restoring state from %s before startup.\n",
+					restore_file);
+				theSystem->RestoreState(restore_file);
+			}
+		}
+
 #if defined(PROFILE)
 		{
 			u64 p_i;

@@ -755,6 +755,8 @@ void CSerial::serial_menu()
 	write_cstr("     2. Abort emulator (no changes saved)\r\n");
 	write_cstr("     3. Save state to autosave.axp and continue\r\n");
 	write_cstr("     4. Load state from autosave.axp and continue\r\n");
+	write_cstr("     5. Save state to autosave.axp and exit (golden bake: no\r\n");
+	write_cstr("        guest writes can land after the save)\r\n");
 #endif
 	while (!exitLoop)
 	{
@@ -802,6 +804,17 @@ void CSerial::serial_menu()
 			cSystem->RestoreState("autosave.axp");
 			write_cstr("%SRL-I-CONTINUE: continuing emulation.\r\n");
 			exitLoop = true;
+			break;
+
+		case '5':
+			// Threads are stopped here, so exiting right after the save
+			// guarantees the disk images exactly match the saved state —
+			// the guest cannot write between save and exit. Restoring a
+			// state saved via '3' (continue) onto a disk the guest kept
+			// writing to yields NTFS corruption (STOP 0x7B / 0xC0000032).
+			write_cstr("%SRL-I-SAVESTATE: Saving state to autosave.axp and exiting.\r\n");
+			cSystem->SaveState("autosave.axp");
+			FAILURE(Graceful, "Save-and-exit from serial menu");
 			break;
 
 		default:
