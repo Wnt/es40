@@ -469,11 +469,26 @@ private:
   // Advance the wall-clock cc to now. Called at batch boundaries AND on every guest RPCC read.
   void sync_cc_wallclock()
   {
+    // A gap this long between two sync points cannot be guest execution (batch
+    // gaps are us-ms; even device-init stalls are far shorter, and diagnostic
+    // print stalls are excluded via g_diag_excluded_ns). It is the host
+    // freezing this process: streamhost's idle-pause SIGSTOP, a debugger, or
+    // host suspend. steady_clock keeps running through all of those.
+    constexpr auto kHostFreezeGap = std::chrono::seconds(5);
     const auto now = std::chrono::steady_clock::now();
     if (cc_last_sync > now)
       cc_last_sync = now;
     auto cc_delta = now - cc_last_sync;
     cc_last_sync = now;
+    if (cc_delta >= kHostFreezeGap)
+    {
+      // The guest executed nothing across the gap, so no guest-visible clock
+      // may advance: bill NO cc and re-anchor every other wall-clock-derived
+      // guest clock (interval timer, TOY/RTC, ACPI PM timer) so the guest
+      // resumes exactly where it stopped instead of seeing a discontinuity.
+      host_freeze_reanchor(now, cc_delta);
+      return;
+    }
     if (state.cc_ena)
     {
       if (cc_delta > std::chrono::seconds(1))   // cap (not drop) odd deltas, as at batch top
@@ -481,6 +496,11 @@ private:
       state.cc += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
     }
   }
+
+  // Out-of-line arm of sync_cc_wallclock: re-anchor the interval-timer
+  // schedule and the shared device clocks after a host-side freeze.
+  void host_freeze_reanchor(std::chrono::steady_clock::time_point now,
+                            std::chrono::steady_clock::duration gap);
 
   // DRAM fast-path cache
   char* dram_ptr;    // cSystem->PtrToMem(0) - host pointer to base es40 ram array thingy

@@ -99,10 +99,14 @@ CAliM1543C_pmu::CAliM1543C_pmu(CConfigurator* cfg, CSystem* c, int pcibus, int p
 
 	ResetPCI();
 
+	thePMU = this;
+
 	printf("%s: $Id$\n", devid_string);
 }
 
 CAliM1543C_pmu::~CAliM1543C_pmu() {}
+
+CAliM1543C_pmu* thePMU = 0;
 
 u32 CAliM1543C_pmu::ReadMem_Bar(int func, int bar, u32 address, int dsize)
 {

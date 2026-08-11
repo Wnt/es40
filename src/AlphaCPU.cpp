@@ -337,6 +337,7 @@
 #include "AlphaCPU.h"
 #include "jit/jitengine.h"
 #include "AliM1543C.h"
+#include "AliM1543C_pmu.h"
 #include "TraceEngine.h"
 #include "lockstep.h"
 #include "cpu_memory.h"
@@ -825,6 +826,34 @@ void CAlphaCPU::jit_flush_blocks_asm()
 {
 	if (m_jit)
 		m_jit->flush_non_global();
+}
+
+// sync_cc_wallclock detected a wall-clock gap no guest execution can produce:
+// the host froze this process (streamhost idle-pause SIGSTOP, a debugger, host
+// suspend) and thawed it `gap` later. The caller already re-anchored cc_last_sync
+// and billed the guest zero cycles; this re-anchors everything else that is
+// derived from steady_clock so every guest-visible clock resumes exactly where
+// it stopped — the same semantics a QEMU guest gets from QMP stop/cont:
+//   * the Cchip interval-timer schedule (no tick backlog, no immediate burst;
+//     the normal cadence resumes within one period),
+//   * the TOY/RTC date-and-time (toy_offset shifts back by the gap, so the
+//     guest's clock does not jump forward by the pause duration),
+//   * the ACPI PM timer anchor.
+// CPU0 owns the shared device clocks; secondary CPUs only re-anchor their cc.
+void CAlphaCPU::host_freeze_reanchor(std::chrono::steady_clock::time_point now,
+                                     std::chrono::steady_clock::duration gap)
+{
+	if (state.iProcNum != 0)
+		return;
+	next_timer_fire = now;
+	tick_last_fire = now;
+	const long gap_s = (long)std::chrono::duration_cast<std::chrono::seconds>(gap).count();
+	const u64 gap_us = (u64)std::chrono::duration_cast<std::chrono::microseconds>(gap).count();
+	if (theAli)
+		theAli->host_freeze_shift_toy(gap_s);
+	if (thePMU)
+		thePMU->host_freeze_shift_anchor(gap_us);
+	printf("%%CPU-I-FREEZE: absorbed a %ld s host freeze; guest clocks resume where they stopped.\n", gap_s);
 }
 
 void CAlphaCPU::jit_run(int budget)

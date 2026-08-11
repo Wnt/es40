@@ -40,6 +40,16 @@ public:
 	virtual void  WriteMem_Bar(int func, int bar, u32 address, int dsize, u32 data);
 	virtual u32   ReadMem_Bar(int func, int bar, u32 address, int dsize);
 
+	// Host-side freeze absorbed (CAlphaCPU::host_freeze_reanchor): move the
+	// PM-timer anchor forward by the freeze duration so the free-running count
+	// resumes where it stopped. No-op until the timer's first read sets the
+	// anchor.
+	void host_freeze_shift_anchor(u64 gap_us)
+	{
+		if (state.pm_timer_anchor_us)
+			state.pm_timer_anchor_us += gap_us;
+	}
+
 private:
 	u32   pm_io_read(u32 address, int dsize);
 	void  pm_io_write(u32 address, int dsize, u32 data);
@@ -57,5 +67,7 @@ private:
 		u64 pm_timer_anchor_us;
 	} state;
 };
+
+extern CAliM1543C_pmu* thePMU;
 
 #endif // !defined(INCLUDED_ALIM1543C_PMU_H_)

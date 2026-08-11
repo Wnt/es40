@@ -223,6 +223,11 @@ public:
   // Period in ns of the MC146818 SQW output (rate from TOY reg A).
   // CPU thread reads this every batch boundary to pace b_irq<2>.
   u64       get_interval_period_ns() const;
+
+  // Host-side freeze absorbed (CAlphaCPU::host_freeze_reanchor): shift the
+  // TOY/RTC back by the freeze duration so the guest's date-and-time resumes
+  // where it stopped instead of jumping forward by the pause.
+  void      host_freeze_shift_toy(long secs) { state.toy_offset -= secs; }
 private:
 
   // interrupt controller
