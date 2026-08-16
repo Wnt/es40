@@ -1502,7 +1502,13 @@ void CKeyboard::ctrl_to_mouse(u8 value)
 		{
 		case 0xe6:  // Set Mouse Scaling to 1:1
 			controller_enQ(0xFA, 1);  // ACK
-			state.mouse.scaling = 2;
+			// Was 2 — the same value 0xe7 sets, so a guest that ASKED for 1:1
+			// silently got 2:1 and moved twice as far as it was told. Invisible
+			// to a guest driving its own hardware mouse (the user just adapts),
+			// but it doubles every injected motion, which is what made the
+			// headless ctlsock's absolute MOVEA land at 2x the intended delta
+			// on Tru64 (and is the same doubling w2kalpha's pointer showed).
+			state.mouse.scaling = 1;
 #ifdef DEBUG_KBD
 			BX_DEBUG(("[mouse] Scaling set to 1:1"));
 #endif

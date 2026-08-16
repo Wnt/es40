@@ -71,6 +71,17 @@ public:
     }
     s->m_w = screen_w;
     s->m_h = screen_h;
+    // Per-guest pointer gain (see m_gain): how many screen pixels this guest's
+    // pointer stack moves per injected PS/2 count. Default 1 leaves every
+    // existing tile's behaviour byte-identical.
+    if (const char* g = getenv("ES40_POINTER_GAIN"))
+    {
+      const int v = atoi(g);
+      if (v >= 1 && v <= 8)
+        s->m_gain = v;
+      else
+        printf("%%CTL-W-GAIN: ignoring ES40_POINTER_GAIN=%s (want 1..8)\n", g);
+    }
     return s;
   }
 
@@ -135,6 +146,16 @@ private:
   bool m_homed = false;
   int m_bx = 0, m_by = 0;
   unsigned m_buttons = 0;
+
+  // Screen pixels the guest moves per injected PS/2 count. 1 on a guest whose
+  // pointer is 1:1; Tru64 UNIX 5.1B's X mouse stack moves TWO pixels per count
+  // (measured: injected 10/25/50/100/200 -> 20/40/100/200/400 with X
+  // acceleration already flat at 1/1, so it is not X acceleration), which made
+  // every absolute MOVEA land at twice its intended delta. ES40_POINTER_GAIN
+  // divides the delta back down; the leftover pixels are carried, so a run of
+  // odd deltas converges instead of drifting.
+  int m_gain = 1;
+  int m_resid_x = 0, m_resid_y = 0;
 
   static const char* tile_name()
   {
@@ -371,9 +392,29 @@ private:
   {
     if (m_home_polls > 0)
       return;
-    inject_mouse(tx - m_bx, ty - m_by);
-    m_bx = tx;
-    m_by = ty;
+    if (m_gain <= 1)
+    {
+      inject_mouse(tx - m_bx, ty - m_by);
+      m_bx = tx;
+      m_by = ty;
+      return;
+    }
+    // Gain-compensated. The pixels we owe are the remaining delta plus what an
+    // earlier odd delta could not express; injected counts can only deliver
+    // whole multiples of the gain, so believe EXACTLY what was injected and
+    // carry the rest. The daemon resends the current target, so the carried
+    // pixel is delivered by the next move rather than being lost.
+    const int want_x = (tx - m_bx) + m_resid_x;
+    const int want_y = (ty - m_by) + m_resid_y;
+    const int inj_x = want_x / m_gain;
+    const int inj_y = want_y / m_gain;
+    const int moved_x = inj_x * m_gain;
+    const int moved_y = inj_y * m_gain;
+    inject_mouse(inj_x, inj_y);
+    m_bx += moved_x;
+    m_by += moved_y;
+    m_resid_x = want_x - moved_x;
+    m_resid_y = want_y - moved_y;
   }
 
   // Map a streamhost KEY field name to a BX_KEY code. Names come from
