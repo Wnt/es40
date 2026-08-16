@@ -174,6 +174,14 @@ public:
 
   } ibm8514;
 
+  // Savestate access (ES40): the block above is plain POD — no pointers, no
+  // host-derived fields — so CS3Trio64::SaveState/RestoreState write it
+  // verbatim. It is device state that lives outside the VGA/S3 register
+  // files, and a restore that skips it leaves the guest's driver talking to a
+  // power-on drawing engine.
+  void*  accel_state() { return &ibm8514; }
+  size_t accel_state_size() const { return sizeof(ibm8514); }
+
 protected:
   ibm8514a_device(const machine_config& mconfig, device_type type, const char* tag, device_t* owner, uint32_t clock);
 

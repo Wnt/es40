@@ -432,21 +432,32 @@ int main(int argc, char* argv[])
 #if defined(IDB)
 		trc = new CTraceEngine(theSystem);
 #endif
-		theSystem->LoadROM();
-		theDPR->init();
-
 		// Instant resume: restore a saved state before the main loop ever
 		// runs, skipping SRM/AlphaBIOS/OS boot entirely. The disk images
 		// must be the ones that were current when the state was saved
 		// (bake pairs via serial-menu option 5: save-and-exit).
+		//
+		// LoadROM inflates the SRM console into guest RAM and points the CPUs
+		// at it — ~30 s of single-stepped decompression, and every byte of it
+		// is overwritten by the restored memory image and CPU state. So when
+		// we are restoring a state file this build can actually read, skip it
+		// outright: that is the difference between a ~35 s and a ~4 s resume.
+		// A missing or foreign file falls back to the normal cold boot.
+		const char* restore_file = getenv("ES40_RESTORE");
+		const bool  restoring = CSystem::CanRestore(restore_file);
+		if (restore_file && *restore_file && !restoring)
+			printf("%%SYS-W-NORESTORE: %s is not a readable state file — cold booting.\n",
+				restore_file);
+
+		if (!restoring)
+			theSystem->LoadROM();
+		theDPR->init();
+
+		if (restoring)
 		{
-			const char* restore_file = getenv("ES40_RESTORE");
-			if (restore_file && *restore_file)
-			{
-				printf("%%SYS-I-RESTORE: Restoring state from %s before startup.\n",
-					restore_file);
-				theSystem->RestoreState(restore_file);
-			}
+			printf("%%SYS-I-RESTORE: Restoring state from %s before startup "
+				"(SRM decompress skipped).\n", restore_file);
+			theSystem->RestoreState(restore_file);
 		}
 
 #if defined(PROFILE)

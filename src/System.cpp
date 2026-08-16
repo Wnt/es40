@@ -2879,6 +2879,28 @@ void CSystem::stop_threads()
 /**
  * Save system state to a state file.
  **/
+// Header check for an instant-resume launch: is this file a state file this
+// build can restore? Answering BEFORE the SRM decompress is what lets
+// AlphaSim skip it (the console it inflates into RAM is overwritten by the
+// restored memory image anyway) — and lets a missing/foreign file fall back to
+// a normal cold boot instead of leaving the guest with no ROM in memory.
+bool CSystem::CanRestore(const char* fn)
+{
+	if (!fn || !*fn)
+		return false;
+
+	FILE* f = fopen(fn, "rb");
+	if (!f)
+		return false;
+
+	u32   magic = 0;
+	u32   version = 0;
+	bool  ok = fread(&magic, sizeof(u32), 1, f) == 1 && magic == 0xa1fae540 &&
+		fread(&version, sizeof(u32), 1, f) == 1 && version == 0x00020001;
+	fclose(f);
+	return ok;
+}
+
 void CSystem::SaveState(const char* fn)
 {
 	FILE* f;

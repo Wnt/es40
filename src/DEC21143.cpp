@@ -2145,9 +2145,16 @@ int CDEC21143::SaveState(FILE* f)
 	if ((res = CPCIDevice::SaveState(f)))
 		return res;
 
+	// state carries two HOST scratch pointers (tx/rx cur_buf). They mean
+	// nothing outside this process, so write them as null: a state file must
+	// never invite a later run to dereference this run's addresses.
+	SNIC_state  saved = state;
+	saved.tx.cur_buf = NULL;
+	saved.rx.cur_buf = NULL;
+
 	fwrite(&nic_magic1, sizeof(u32), 1, f);
 	fwrite(&ss, sizeof(long), 1, f);
-	fwrite(&state, sizeof(state), 1, f);
+	fwrite(&saved, sizeof(saved), 1, f);
 	fwrite(&nic_magic2, sizeof(u32), 1, f);
 	printf("%s: %li bytes saved.\n", devid_string, ss);
 	return 0;
@@ -2193,12 +2200,29 @@ int CDEC21143::RestoreState(FILE* f)
 		return -1;
 	}
 
+	// The TX scratch buffer is a LIVE host allocation from init() and the RX
+	// one is owned by the receive path — neither may come from the file. Both
+	// must survive the fread, or the first descriptor the restored guest hands
+	// the NIC is DMA'd into a pointer from another process (SIGSEGV in
+	// dec21143_tx the moment a restored guest transmits).
+	unsigned char* tx_buf = state.tx.cur_buf;
+	unsigned char* rx_buf = state.rx.cur_buf;
+
 	fread(&state, sizeof(state), 1, f);
 	if (r != 1)
 	{
 		printf("%s: unexpected end of file!\n", devid_string);
 		return -1;
 	}
+
+	state.tx.cur_buf = tx_buf;
+	state.rx.cur_buf = rx_buf;
+	// A half-assembled frame cannot be resumed: its remaining segments were
+	// described by a descriptor chain the restored guest will re-walk from the
+	// top. Drop it rather than append to it.
+	state.tx.cur_buf_len = 0;
+	state.rx.cur_buf_len = 0;
+	state.rx.cur_offset = 0;
 
 	r = fread(&m2, sizeof(u32), 1, f);
 	if (r != 1)

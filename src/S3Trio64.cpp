@@ -3796,6 +3796,17 @@ static u32  s3_magic2 = 0x88115333;
 static u32  s3_video_magic1 = 0x53335631;   // "S3V1"
 static u32  s3_video_magic2 = 0x31563353;
 
+// Accelerator-state section appended 2026-08-16: the 8514/A drawing engine
+// (m_8514) is a device MEMBER, so none of the sections above carried it. A
+// restored guest therefore came back with a power-on accelerator — default
+// dst_base/src_base, zeroed scissors, no color depth — while its driver
+// believed the engine was still programmed. Everything the guest drew through
+// the engine (window frames, solid fills, blits) then landed outside the
+// visible framebuffer: the "post-restore partial paint". The block is plain
+// POD, written verbatim, with its own magic pair.
+static u32  s3_accel_magic1 = 0x38353134;   // "8514"
+static u32  s3_accel_magic2 = 0x34313538;
+
 /**
  * Save state to a Virtual Machine State file.
  **/
@@ -3822,6 +3833,15 @@ int CS3Trio64::SaveState(FILE* f)
 	vs = sizeof(s3);
 	fwrite(&vs, sizeof(long), 1, f);
 	fwrite(&s3, sizeof(s3), 1, f);
+
+	// 8514/A drawing-engine registers (device member, not part of any struct
+	// above) — without these a restored guest draws through a power-on engine.
+	vs = (long)m_8514.accel_state_size();
+	fwrite(&s3_accel_magic1, sizeof(u32), 1, f);
+	fwrite(&vs, sizeof(long), 1, f);
+	fwrite(m_8514.accel_state(), (size_t)vs, 1, f);
+	fwrite(&s3_accel_magic2, sizeof(u32), 1, f);
+
 	vs = (long)vga.svga_intf.vram_size;
 	fwrite(&vs, sizeof(long), 1, f);
 	if (vs > 0)
@@ -3955,6 +3975,38 @@ int CS3Trio64::RestoreState(FILE* f)
 	if (r != 1)
 	{
 		printf("%s: unexpected end of file (s3 struct)!\n", devid_string);
+		return -1;
+	}
+
+	// 8514/A drawing-engine registers. A state file without this section
+	// predates the accelerator fix and restores into partial repaints, so
+	// refuse it instead of resuming into a half-drawn desktop.
+	r = fread(&m1, sizeof(u32), 1, f);
+	if (r != 1 || m1 != s3_accel_magic1)
+	{
+		printf("%s: ACCEL MAGIC 1 does not match (state file predates the "
+			"8514/A accelerator section — re-bake the golden)!\n", devid_string);
+		return -1;
+	}
+
+	r = fread(&vs, sizeof(long), 1, f);
+	if (r != 1 || vs != (long)m_8514.accel_state_size())
+	{
+		printf("%s: ACCEL STRUCT SIZE does not match!\n", devid_string);
+		return -1;
+	}
+
+	r = fread(m_8514.accel_state(), (size_t)vs, 1, f);
+	if (r != 1)
+	{
+		printf("%s: unexpected end of file (8514/A state)!\n", devid_string);
+		return -1;
+	}
+
+	r = fread(&m2, sizeof(u32), 1, f);
+	if (r != 1 || m2 != s3_accel_magic2)
+	{
+		printf("%s: ACCEL MAGIC 2 does not match!\n", devid_string);
 		return -1;
 	}
 
